@@ -1,4 +1,4 @@
-## Portforwarder - Build, Package, Deploy (CentOS 6 friendly)
+## Portforwarder - Build, Package, Deploy
 
 A GO lang program to forward WebSocket connections to TCP backend, capable of running a child process and lifecycle management.
 

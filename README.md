@@ -35,13 +35,6 @@ If `config.json` is not found, default values will be used.
   - `portforward.pem` (combined)
   - `portforward.p12` / `portforward.pfx` / `portforward.der` (empty password, or common passwords like "changeit")
 
-### Package
-
-Output tarball under `dist/portforwarder_YYYYMMDD_HHMMSS.tar.gz` containing:
-- `portforwarder` binary
-- optional `cer/` and `lcserver_org`
-- `sysvinit/portforwarder` (init.d script)
-- `sysconfig/portforwarder` (args template)
 
 ### Deploy to server (scp + init.d on CentOS 6)
 

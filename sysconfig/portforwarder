@@ -1,0 +1,5 @@
+# Arguments for portforwarder. Example:
+#   -p /pirate/lcserver -H 10.18.14.35:2182,10.18.14.36:2182,10.18.14.37:2182 \
+#   -G game20817 -w 10.18.14.34 -l 10.18.14.34 -d pirate20817 -W 8817 -L 9817
+
+DAEMON_ARGS="-w 0.0.0.0 -W 8001 -l 0.0.0.0 -L 9001"

@@ -1,0 +1,5 @@
+{
+  "ws_port_offset": 10000,
+  "wss_port_offset": 20000,
+  "child_binary": "lcserver_org"
+}

@@ -36,7 +36,7 @@ If `config.json` is not found, default values will be used.
   - `portforward.p12` / `portforward.pfx` / `portforward.der` (empty password, or common passwords like "changeit")
 
 
-### Deploy to server (scp + init.d on CentOS 6)
+### Deploy to server
 
 Actions:
 - Upload tarball, extract to `/opt/portforwarder`

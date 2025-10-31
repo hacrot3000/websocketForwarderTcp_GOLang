@@ -15,6 +15,7 @@ import (
     "os/signal"
     "path/filepath"
     "runtime"
+    "strconv"
     "strings"
     "sync"
     "syscall"
@@ -199,15 +200,31 @@ func main() {
     // Start child if requested
     var childCmd *exec.Cmd
     if shouldRunChild {
+        // Kill existing processes with same arguments before starting new one
+        log.Printf("[SCAN] Scanning for existing child processes with matching arguments...")
+        if err := killProcessesByArgs(appConfig.ChildBinary, childArgs); err != nil {
+            log.Printf("[SCAN] Warning: Failed to scan/kill existing processes: %v", err)
+        }
+
         childBinaryPath := "./" + appConfig.ChildBinary
         log.Printf("[CHILD] Starting child process: %s", childBinaryPath)
         childCmd = exec.Command(childBinaryPath, childArgs...)
         childCmd.Stdout = os.Stdout
         childCmd.Stderr = os.Stderr
         childCmd.Stdin = os.Stdin
+
+        // Set up process attributes to ensure child dies when parent is killed
+        // Use Pdeathsig to send SIGKILL to child when parent dies (even on kill -9)
+        childCmd.SysProcAttr = &syscall.SysProcAttr{
+            Pdeathsig: syscall.SIGKILL, // Kill child when parent dies
+        }
+
         if err := childCmd.Start(); err != nil {
             log.Fatalf("[CHILD] Failed to start %s: %v", appConfig.ChildBinary, err)
         }
+
+        log.Printf("[CHILD] Started child process with PID %d", childCmd.Process.Pid)
+
         go func() {
             err := childCmd.Wait()
             if err != nil {
@@ -223,19 +240,55 @@ func main() {
     sigCh := make(chan os.Signal, 8)
     signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT, syscall.SIGUSR1, syscall.SIGUSR2)
 
+    // Cleanup function to kill child process
+    cleanupChild := func() {
+        if childCmd != nil && childCmd.Process != nil {
+            // Kill child process directly
+            log.Printf("[CLEANUP] Killing child process %d", childCmd.Process.Pid)
+            _ = childCmd.Process.Kill()
+            childCmd.Wait()
+        }
+    }
+
     select {
     case sig := <-sigCh:
+        log.Printf("[SIGNAL] Received signal: %v, shutting down...", sig)
+        // Kill child process first if it exists
         if childCmd != nil && childCmd.Process != nil {
+            log.Printf("[SIGNAL] Sending signal %v to child process %d", sig, childCmd.Process.Pid)
             _ = childCmd.Process.Signal(sig)
+
+            // Wait for child to exit gracefully (with timeout)
+            childDone := make(chan struct{})
+            go func() {
+                childCmd.Wait()
+                close(childDone)
+            }()
+
+            select {
+            case <-childDone:
+                log.Printf("[SIGNAL] Child process exited gracefully")
+            case <-time.After(5 * time.Second):
+                log.Printf("[SIGNAL] Child process did not exit within 5 seconds, force killing...")
+                _ = childCmd.Process.Kill()
+                childCmd.Wait() // Wait for kill to complete
+                log.Printf("[SIGNAL] Child process force killed")
+            }
         }
     case <-stopCh:
-        // child exited
+        // child exited on its own
+        log.Printf("[SIGNAL] Child process exited")
     }
 
     // Graceful shutdown of servers
+    log.Printf("[SHUTDOWN] Shutting down WebSocket servers...")
     ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
     srvGroup.shutdownAll(ctx)
     cancel()
+    log.Printf("[SHUTDOWN] Shutdown complete")
+
+    // Final cleanup (in case something was missed)
+    cleanupChild()
 }
 
 func listenAndServeHTTP(srv *http.Server) error {
@@ -507,4 +560,111 @@ func containsFlag(args []string, name string) bool {
         }
     }
     return false
+}
+
+// findProcessByArgs searches for running processes matching the given binary and arguments
+func findProcessByArgs(binaryName string, args []string) ([]int, error) {
+    // Use ps to list all processes with full command line
+    cmd := exec.Command("ps", "aux")
+    output, err := cmd.Output()
+    if err != nil {
+        return nil, fmt.Errorf("failed to run ps: %v", err)
+    }
+
+    var matchingPIDs []int
+    lines := strings.Split(string(output), "\n")
+
+    // Build the expected command line pattern
+    expectedCmd := binaryName
+    for _, arg := range args {
+        expectedCmd += " " + arg
+    }
+
+    for _, line := range lines {
+        if line == "" {
+            continue
+        }
+
+        // Parse ps output: USER PID %CPU %MEM VSZ RSS TTY STAT START TIME COMMAND
+        fields := strings.Fields(line)
+        if len(fields) < 11 {
+            continue
+        }
+
+        // Get PID (second field)
+        pid, err := strconv.Atoi(fields[1])
+        if err != nil {
+            continue
+        }
+
+        // Get command line (from field 11 onwards)
+        cmdLine := strings.Join(fields[10:], " ")
+
+        // Check if this is our binary
+        if !strings.Contains(cmdLine, binaryName) {
+            continue
+        }
+
+        // Skip our own process
+        if pid == os.Getpid() {
+            continue
+        }
+
+        // Check if all arguments match
+        allMatch := true
+        for _, arg := range args {
+            if !strings.Contains(cmdLine, arg) {
+                allMatch = false
+                break
+            }
+        }
+
+        if allMatch {
+            matchingPIDs = append(matchingPIDs, pid)
+            log.Printf("[SCAN] Found matching process: PID=%d, CMD=%s", pid, cmdLine)
+        }
+    }
+
+    return matchingPIDs, nil
+}
+
+// killProcessesByArgs finds and kills all processes matching the given binary and arguments
+func killProcessesByArgs(binaryName string, args []string) error {
+    pids, err := findProcessByArgs(binaryName, args)
+    if err != nil {
+        return err
+    }
+
+    if len(pids) == 0 {
+        log.Printf("[SCAN] No existing processes found with matching arguments")
+        return nil
+    }
+
+    log.Printf("[SCAN] Found %d existing process(es) with matching arguments", len(pids))
+
+    for _, pid := range pids {
+        log.Printf("[KILL] Killing process %d...", pid)
+
+        process, err := os.FindProcess(pid)
+        if err != nil {
+            log.Printf("[KILL] Failed to find process %d: %v", pid, err)
+            continue
+        }
+
+        // Try graceful shutdown first
+        _ = process.Signal(syscall.SIGTERM)
+        time.Sleep(1 * time.Second)
+
+        // Check if still running
+        if err := process.Signal(syscall.Signal(0)); err == nil {
+            // Still running, force kill
+            log.Printf("[KILL] Process %d did not exit gracefully, force killing...", pid)
+            _ = process.Kill()
+            time.Sleep(500 * time.Millisecond)
+        } else {
+            log.Printf("[KILL] Process %d exited gracefully", pid)
+        }
+    }
+
+    return nil
 }
